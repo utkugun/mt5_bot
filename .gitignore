@@ -1,0 +1,22 @@
+# This repo is scoped to the mt5_bot project only. The parent folder also
+# holds many unrelated personal projects (open-webui, siparişler, driver_cam,
+# completer, urun_agaci*, po_mcp, whatsapp_bot, etc.) that were never meant to
+# be tracked here -- without this deny-by-default block, VS Code/git treat
+# every file in all of them as untracked (open-webui alone is ~53,000 files).
+/*
+!/.gitignore
+!/mt5_bot/
+!/start_mt5_bot.bat
+!/start_excel_mcp.bat
+!/start_po_pipeline.bat
+
+# Secrets -- real MT5/API credentials, never commit
+mt5_bot/local_settings.py
+
+# Generated logs, caches, and run output -- never worth committing
+*.log
+__pycache__/
+.webui_secret_key
+/backtest_results/
+/backtest_results_rf10/
+/finetune_data/
