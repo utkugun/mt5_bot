@@ -22,6 +22,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         df["close"], config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL
     )
     df["atr"] = indicators.atr(df, config.ATR_PERIOD)
+    pivots = indicators.pivot_points(df)
+    df["pivot"] = pivots["pivot"]
+    df["r1"] = pivots["r1"]
+    df["s1"] = pivots["s1"]
     return df
 
 

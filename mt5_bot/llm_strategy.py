@@ -62,6 +62,9 @@ positions (all opened by this bot), and an indicator snapshot per symbol on the 
 timeframe:
 close, chg5 (% change over last 5 candles), chg20 (% change over last 20 candles), ema_fast, \
 ema_slow, ema_trend (long-term trend EMA), rsi (0-100), macd, macd_signal, atr (in price units), \
+pivot/r1/s1 (classic daily floor pivot, first resistance, first support -- computed from the prior \
+completed trading day's high/low/close, held constant through the current day; null just means less \
+than a full prior day of history is available yet, not a red flag), \
 spread_pts (current spread in points), news_blackout (name of a high-impact scheduled economic \
 release if one currently blocks a NEW entry on that symbol's currencies, else null -- code-enforced, \
 see HARD CONSTRAINTS; treat non-null as "don't spend a top-ranked slot proposing BUY/SELL here right \
@@ -176,6 +179,20 @@ Conflicting signals on one symbol are normal - pick the side with the stronger r
 rsi alone, with chg5 still confirming the existing move, is NOT a reason to trade against the \
 trend - that is the single most common mistake here: don't confuse "extended" with "reversing."
 
+=== SUPPORT/RESISTANCE (pivot, r1, s1) ===
+These are structure, not a setup by themselves - a level from the prior trading day's range, not a \
+signal on their own. Use them to sharpen conviction on a setup the catalog above already justifies:
+- BREAKOUT is stronger when the acceleration is actually clearing r1 (resistance) or s1 (support), \
+not just moving through open space with no level nearby.
+- BOUNCE/REVERSAL are more textbook when the stretched or turning price is happening AT r1 or s1 - \
+a counter-trend read with no nearby level to justify the turn is a weaker, lower-conviction version \
+of the same setup, not a reason to skip r1/s1 entirely.
+- PULLBACK toward the pivot itself (not just ema_fast/ema_slow) is corroborating evidence for a \
+continuation entry in the trend direction.
+- Don't invent a trade because price is near a level - it still has to clear the setup catalog's own \
+criteria first; proximity to pivot/r1/s1 raises or lowers conviction on a real setup, it doesn't \
+create one.
+
 === USE YOUR OWN REALIZED TRACK RECORD (recent_performance in ACCOUNT) ===
 by_setup and by_direction give your actual win_rate_pct and expectancy (avg $ per closed trade) \
 per setup tag and per direction over the trailing lookback_days, from real closed trades only \
@@ -230,11 +247,17 @@ a high-bar action, not a reflex:
 - Do NOT close because a position is at a small floating loss or profit, or because momentum looks \
 "a bit" weaker. That is exactly what the stop-loss and take-profit are for; closing on noise \
 pre-empts them.
-- CLOSE only when (a) margin_level has genuinely dropped into risk territory (well below ~150%), \
-or (b) the entry thesis has clearly and specifically reversed - price crossed back through \
-ema_trend against the position, or macd fully flipped against it - not merely stalled or pulled \
-back.
-- When in doubt, HOLD.
+- CLOSE when (a) margin_level has genuinely dropped into risk territory (well below ~150%), or \
+(b) the entry thesis has clearly and specifically reversed - price crossed back through ema_trend \
+against the position, or macd fully flipped against it - not merely stalled or pulled back, or \
+(c) PROFIT_LOCK: the position is sitting on a clearly strong unrealized gain (pnl well past a small \
+float, into territory that would look like a good outcome to bank right now) AND momentum has \
+genuinely turned against continuing to the take-profit - rsi snapping back from an extreme, macd \
+crossing against the position, or chg5 flipping against chg20 - not merely flattening out. This is \
+for banking a real, extended winner that's showing real signs of giving it back, not for nudging out \
+of a merely-green position early; a small or middling unrealized gain with no clear turn is HOLD.
+- When in doubt, HOLD - this applies to PROFIT_LOCK exactly as much as to (a)/(b); a plausible-looking \
+turn on a winner is not the same as a clear one.
 Being selective about ENTRIES above does not make CLOSE any less high-bar - they're independent judgments.
 
 === HARD CONSTRAINTS ===
@@ -262,8 +285,9 @@ e.g. "PULLBACK | uptrend intact, price back to ema_fast, rsi 44"
      "REVERSAL | rsi 78 with chg5 turning negative after +1.8% chg20"
      "BOUNCE | rsi 21 extreme after -2.4% chg20, no turn yet, tactical snap-back long"
 Tags: TREND, PULLBACK, BREAKOUT, MOMO, MACD_TURN, BOUNCE, REVERSAL, RISK (for margin-driven \
-closes), THESIS_BROKEN (for reversal-driven closes), MAKE_ROOM (for closes that free a slot/margin \
-for a stronger paired candidate).
+closes), THESIS_BROKEN (for reversal-driven closes), PROFIT_LOCK (for closes banking a strong, \
+turning winner - see EXITS above), MAKE_ROOM (for closes that free a slot/margin for a stronger \
+paired candidate).
 
 Respond ONLY by calling the trade_decisions tool.
 """
@@ -298,6 +322,7 @@ DECISIONS_TOOL = {
                                 "REVERSAL",
                                 "RISK",
                                 "THESIS_BROKEN",
+                                "PROFIT_LOCK",
                                 "MAKE_ROOM",
                             ],
                             "description": "Setup type, for per-setup performance scoring.",
@@ -460,6 +485,9 @@ def build_symbol_row(symbol: str, df, spread_pts: float, position) -> dict | Non
         "macd": round(float(last["macd"]), 5) if last["macd"] == last["macd"] else None,
         "macd_signal": round(float(last["macd_signal"]), 5) if last["macd_signal"] == last["macd_signal"] else None,
         "atr": round(float(last["atr"]), 5) if last["atr"] == last["atr"] else None,
+        "pivot": round(float(last["pivot"]), 5) if last["pivot"] == last["pivot"] else None,
+        "r1": round(float(last["r1"]), 5) if last["r1"] == last["r1"] else None,
+        "s1": round(float(last["s1"]), 5) if last["s1"] == last["s1"] else None,
         "spread_pts": round(spread_pts, 1),
         "open_position": None,
     }
