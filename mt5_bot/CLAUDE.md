@@ -17,7 +17,11 @@ closed candles and either:
   of the bot doesn't know or care which one answered.
 
 Position sizing, stop-loss, and take-profit are always computed deterministically from ATR and
-account risk settings (`risk.py`) — the LLM only picks direction/timing, never numbers.
+account risk settings (`risk.py`) — the LLM only picks direction/timing, never numbers. A
+mechanical trailing profit-lock (`risk.trailing_sl_update`, driven by `config.TRAIL_ACTIVATE_R`/
+`TRAIL_GIVEBACK_R`) ratchets each open position's stop-loss once it's shown a real gain, so a
+winner that reverses without ever touching its original SL/TP still banks most of what it made —
+see `risk.py`/`bot.py` below.
 
 This package is run as `python -m mt5_bot.bot` (or `mt5_bot.backtest`) from the **parent**
 directory (`utku python`), since `bot.py`/`backtest.py` use relative imports (`from . import
@@ -61,7 +65,8 @@ stress). Real MT5 credentials go in `local_settings.py` (git-ignored; copy from
 Key knobs: `SYMBOLS`/`SYMBOL_GROUP_FILTER` (which pairs/metals to trade — `SYMBOL_GROUP_FILTER`
 takes a string or a list, e.g. `["Forex", "Metals"]`, matched against each symbol's broker
 group path; check your broker's actual path naming and adjust if needed), `TIMEFRAME`, risk settings
-(`RISK_PCT_PER_TRADE`, `SL_ATR_MULT`/`TP_ATR_MULT`, `MAX_TOTAL_OPEN_POSITIONS`,
+(`RISK_PCT_PER_TRADE`, `SL_ATR_MULT`/`TP_ATR_MULT`, `TRAIL_ACTIVATE_R`/`TRAIL_GIVEBACK_R` (the
+mechanical trailing profit-lock — see `risk.py` below), `MAX_TOTAL_OPEN_POSITIONS`,
 `MAX_DAILY_LOSS_PCT`, `MARGIN_USAGE_CAP`), the LLM block (`USE_LLM_STRATEGY`, `LLM_MODEL`,
 `LLM_CLOCK_SYMBOL`), and the news block (`NEWS_HEADLINES_ENABLED`, `NEWS_CALENDAR_ENABLED`,
 `NEWS_CALENDAR_MIN_IMPACT`, `NEWS_CALENDAR_BLACKOUT_MIN_BEFORE`/`_AFTER` — see `news.py` below).
@@ -122,9 +127,22 @@ risk that the 2026-09-09 -30% day came from.
 - **`risk.py`** — `calc_lot_size()`: sizes a position so a stop-loss hit costs
   `RISK_PCT_PER_TRADE` of balance, capped by `MARGIN_USAGE_CAP` of free margin via a binary
   search over `mt5.order_calc_margin` (margin isn't linear in volume for many brokers).
+  `trailing_sl_update()`: the mechanical profit-lock — a pure function of direction, entry
+  price, the position's *original* SL (fixed — defines its 1R risk distance), its current SL,
+  and the current price. Once profit reaches `TRAIL_ACTIVATE_R` multiples of that R, returns a
+  new SL that locks in `(profit_R - TRAIL_GIVEBACK_R) * R`, re-ratcheting tighter as price
+  extends further; returns `None` below the activation threshold or whenever the computed level
+  would loosen (not tighten) the current SL. It never touches take-profit, so a strong move can
+  still run all the way to TP — this only bounds how much of an already-earned gain can be given
+  back if price reverses before getting there. Added 2026-09-17 after an XAGUSD trade rode from
+  +$15k unrealized down to +$2k because it never touched its SL/TP and the LLM's own
+  discretionary CLOSE/PROFIT_LOCK judgment (deliberately conservative, see `llm_strategy.py`'s
+  `SYSTEM_PROMPT`) held through the whole round trip — this is a code-level backstop, independent
+  of the LLM, same pattern as the margin/concentration gates.
 - **`trader.py`** — sends actual `mt5.order_send` requests (open/close), picks a supported
   order-filling mode per symbol, tags all bot orders with `MAGIC_NUMBER` so `open_positions()`
-  only ever sees/manages this bot's own trades.
+  only ever sees/manages this bot's own trades. `modify_sl()` ratchets an open position's SL via
+  `TRADE_ACTION_SLTP` (TP untouched) — used only by the trailing profit-lock.
 - **`bot.py`** — the live polling loop. Two decision paths depending on
   `config.USE_LLM_STRATEGY`:
   - **LLM path**: waits for a new closed candle on `LLM_CLOCK_SYMBOL` only, then runs one
@@ -133,14 +151,23 @@ risk that the 2026-09-09 -30% day came from.
     signal, then opens on confluence.
 
   Also owns: daily-loss circuit breaker (tracked from midnight-UTC balance, blocks new entries
-  only — never touches existing SL/TP), and stale-data-feed detection/logging (distinguishes
-  "market closed" from "feed actually stuck").
+  only — never touches existing SL/TP), stale-data-feed detection/logging (distinguishes
+  "market closed" from "feed actually stuck"), and `_apply_trailing_stops()` — runs every poll
+  tick (every `POLL_SECONDS`, independent of the candle/LLM cadence) against every open
+  bot-owned position on every symbol, calling `risk.trailing_sl_update()` / `trader.modify_sl()`.
+  It tracks each position's *original* SL in an in-memory `ticket -> sl` dict (seeded from
+  whatever SL is on the position the first time its ticket is seen this run, so it resets on
+  restart — same known limitation as `balance_history`/`sizing_balance`).
 - **`backtest.py`** — replays the **exact same** `llm_strategy`/`risk` decision logic against
   historical MT5 candles via a `SimBroker` (not the MT5 Strategy Tester, which can't run Python
   EAs at all). Fills at candle close ± half historical spread; SL is assumed to win if a single
-  bar's range touches both SL and TP (worst-case). This makes real Anthropic API calls per
-  simulated decision cycle — always run `--dry-run` first to see the call count before spending
-  money. Results (trades.csv, equity_curve.csv) are written to `../backtest_results/`.
+  bar's range touches both SL and TP (worst-case). The trailing profit-lock is replayed too —
+  `apply_trailing_and_check()` ratchets each `SimPosition.sl` off the bar's favorable high/low
+  before checking that bar's SL/TP hit, using the same `risk.trailing_sl_update()`; trades closed
+  this way show up in `trades.csv` as `reason="TRAIL_SL"` rather than `"SL"`. This makes real
+  Anthropic API calls per simulated decision cycle — always run `--dry-run` first to see the call
+  count before spending money. Results (trades.csv, equity_curve.csv) are written to
+  `../backtest_results/`.
 
 ## Working on this code
 

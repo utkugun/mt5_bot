@@ -97,6 +97,23 @@ MAX_MARGIN_PCT_OF_BALANCE = 0.15  # a single new trade's required margin may als
 # advisory; this is enforced. Doesn't touch existing positions' own SL/TP.
 MIN_MARGIN_LEVEL_FOR_NEW_ENTRIES = 150.0  # percent; None/0 margin_used (no open positions) never blocks
 
+# Mechanical profit-lock (trailing stop-loss) -- added 2026-09-17 after an
+# XAGUSD trade rode from +$15k unrealized down to +$2k because it never
+# touched its SL or TP and the LLM's own CLOSE/PROFIT_LOCK judgment (see
+# llm_strategy.SYSTEM_PROMPT) is deliberately conservative, so it held
+# through the whole round trip. This is a code-level backstop, independent
+# of the LLM, same pattern as the margin/concentration gates: once a
+# position's unrealized gain reaches TRAIL_ACTIVATE_R multiples of its own
+# initial risk (the price distance from entry to its ORIGINAL stop-loss),
+# the bot ratchets that position's stop-loss to lock in
+# (profit_R - TRAIL_GIVEBACK_R) * initial_risk, and keeps re-ratcheting it
+# tighter as price extends further -- see risk.trailing_sl_update. The SL
+# only ever tightens, never loosens, and the take-profit is untouched, so a
+# strong move can still run all the way to TP; this only bounds how much of
+# an already-earned gain can be given back if it reverses first.
+TRAIL_ACTIVATE_R = 1.0      # profit, in multiples of initial risk, before the trailing SL activates at all
+TRAIL_GIVEBACK_R = 0.6      # once active, how much of the peak profit-in-R the trailing SL allows giving back
+
 # Hard, code-level backstop for currency/metal concentration -- mirrors the
 # prompt's own "max 2 positions same currency, same direction" rule, but
 # enforced in code instead of trusted to the LLM. A BUY on EURUSD counts as

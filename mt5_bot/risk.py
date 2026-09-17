@@ -115,6 +115,43 @@ def sizing_balance(current_balance: float, balance_history, now, lookback_days: 
     return min(current_balance, aged)
 
 
+def trailing_sl_update(direction: str, price_open: float, initial_sl: float,
+                        current_sl: float, current_price: float):
+    """Mechanical profit-lock: returns a new stop-loss price to ratchet to, or
+    None if no update is due right now.
+
+    `initial_sl` MUST be the position's stop-loss as originally set at entry,
+    not its current (possibly already-trailed) one -- R is the price distance
+    from price_open to that original SL, and it has to stay fixed for the life
+    of the position or profit_R inflates itself into a runaway trail every
+    time the SL ratchets closer to price.
+
+    Once profit reaches TRAIL_ACTIVATE_R multiples of R, this locks in
+    (profit_R - TRAIL_GIVEBACK_R) * R -- i.e. once active it always allows
+    giving back at most TRAIL_GIVEBACK_R worth of R from whatever peak profit
+    has been reached. Returns None below the activation threshold, or if the
+    computed level would loosen (not tighten) `current_sl` -- the SL this
+    produces only ever moves in the position's favor.
+    """
+    r = abs(price_open - initial_sl)
+    if r <= 0:
+        return None
+
+    is_buy = direction == "BUY"
+    profit_r = (current_price - price_open) / r if is_buy else (price_open - current_price) / r
+    if profit_r < config.TRAIL_ACTIVATE_R:
+        return None
+
+    locked_r = max(0.0, profit_r - config.TRAIL_GIVEBACK_R)
+    new_sl = price_open + locked_r * r if is_buy else price_open - locked_r * r
+
+    if is_buy and new_sl <= current_sl:
+        return None
+    if not is_buy and new_sl >= current_sl:
+        return None
+    return new_sl
+
+
 def open_risk_dollars(positions) -> float:
     """Sum of $ (account currency) currently at risk across a list of MT5
     position objects -- i.e. what each position's own stop-loss would cost if

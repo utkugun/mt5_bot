@@ -10,7 +10,12 @@ get_decisions, risk.calc_lot_size), against a simple simulated broker:
 - fills at the close of the candle that triggered the decision, offset by
   half the bar's historical spread to approximate ask/bid
 - SL/TP checked against each subsequent bar's high/low (SL assumed to win on
-  a bar that touches both, i.e. the conservative/worst-case assumption)
+  a bar that touches both, i.e. the conservative/worst-case assumption); the
+  mechanical trailing profit-lock (risk.trailing_sl_update, see config.py's
+  TRAIL_ACTIVATE_R/TRAIL_GIVEBACK_R) is replayed too, ratcheting a position's
+  SL off each bar's favorable high/low before that bar's hit is checked --
+  trades closed this way show up in trades.csv as reason="TRAIL_SL" rather
+  than "SL"
 - position sizing, margin cap and account-summary figures reuse risk.py and
   mt5.order_calc_margin/order_calc_profit against live symbol specs (margin
   rates etc. are pulled as of now, not as of the historical date -- a known
@@ -67,10 +72,15 @@ class SimPosition:
     direction: str  # "BUY" / "SELL"
     volume: float
     price_open: float
-    sl: float
+    sl: float           # current SL -- ratcheted by the trailing profit-lock, see apply_trailing_and_check()
     tp: float
     open_time: pd.Timestamp
     setup: str = None  # the LLM's own setup tag at entry, for sim_recent_performance()
+    initial_sl: float = None  # SL as originally set at entry, fixed -- feeds risk.trailing_sl_update
+
+    def __post_init__(self):
+        if self.initial_sl is None:
+            self.initial_sl = self.sl
 
     @property
     def order_type(self) -> int:
@@ -87,7 +97,7 @@ class Trade:
     close_price: float
     volume: float
     pnl: float
-    reason: str  # "SL", "TP", "LLM_CLOSE", "END_OF_TEST"
+    reason: str  # "SL", "TRAIL_SL", "TP", "LLM_CLOSE", "FALLBACK_CLOSE", "END_OF_TEST"
     setup: str = None
 
 
@@ -128,15 +138,29 @@ def check_sl_tp(pos: SimPosition, bar) -> tuple[str, float] | None:
     else None. SL checked first when a single bar touches both (worst case)."""
     if pos.direction == "BUY":
         if bar["low"] <= pos.sl:
-            return "SL", pos.sl
+            return ("SL" if pos.sl <= pos.initial_sl else "TRAIL_SL"), pos.sl
         if bar["high"] >= pos.tp:
             return "TP", pos.tp
     else:
         if bar["high"] >= pos.sl:
-            return "SL", pos.sl
+            return ("SL" if pos.sl >= pos.initial_sl else "TRAIL_SL"), pos.sl
         if bar["low"] <= pos.tp:
             return "TP", pos.tp
     return None
+
+
+def apply_trailing_and_check(pos: SimPosition, bar) -> tuple[str, float] | None:
+    """Mirrors bot.py's _apply_trailing_stops for the sim broker: ratchets
+    pos.sl using the bar's most favorable price this bar reached (its high for
+    a BUY, low for a SELL) via risk.trailing_sl_update, then checks SL/TP
+    against the bar's full range -- same worst-case ordering as check_sl_tp,
+    now against whatever SL that ratcheting just produced."""
+    is_buy = pos.direction == "BUY"
+    favorable = bar["high"] if is_buy else bar["low"]
+    new_sl = risk.trailing_sl_update(pos.direction, pos.price_open, pos.initial_sl, pos.sl, favorable)
+    if new_sl is not None:
+        pos.sl = new_sl
+    return check_sl_tp(pos, bar)
 
 
 class SimBroker:
@@ -298,7 +322,7 @@ def run_backtest(symbols, clock_symbol, start, end, starting_balance, dry_run=Fa
 
             pos = broker.positions.get(symbol)
             if pos is not None:
-                hit = check_sl_tp(pos, bar)
+                hit = apply_trailing_and_check(pos, bar)
                 if hit is not None:
                     reason, fill_price = hit
                     broker.close(symbol, fill_price, t, reason)

@@ -77,6 +77,24 @@ def close_position(position):
     return result
 
 
+def modify_sl(position, new_sl: float):
+    """Ratchets an open position's stop-loss to `new_sl` via TRADE_ACTION_SLTP,
+    leaving its take-profit untouched -- used by the trailing profit-lock
+    (see risk.trailing_sl_update / bot._apply_trailing_stops), which only ever
+    calls this with a tightening value, never a loosening one."""
+    info = mt5.symbol_info(position.symbol)
+    digits = info.digits if info is not None else 5
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": position.symbol,
+        "position": position.ticket,
+        "sl": round(new_sl, digits),
+        "tp": position.tp,
+        "magic": config.MAGIC_NUMBER,
+    }
+    return mt5.order_send(request)
+
+
 def open_trade(symbol: str, direction: str, atr_value: float, balance: float, setup_tag: str = None):
     if spread_points(symbol) > config.MAX_SPREAD_POINTS:
         log.info("%s: spread too wide, skipping entry", symbol)

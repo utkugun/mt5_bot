@@ -98,6 +98,13 @@ def run():
     last_clock_candle_time = None
     current_day = datetime.now(timezone.utc).date()
     day_start_balance = account.balance
+    # ticket -> stop-loss as originally set at entry (fixed for the life of
+    # the position) -- feeds the trailing profit-lock; see
+    # _apply_trailing_stops. Resets on restart, same known limitation as
+    # balance_history below (a position already open at that point gets its
+    # then-current SL adopted as "initial" -- a reasonable approximation
+    # since restarts are rare, not the common case this guards).
+    initial_sl_by_ticket = {}
     halted_today = False
     # (timestamp, balance) samples, oldest first -- feeds risk.sizing_balance()
     # so position sizing can't inflate off a fresh, unproven balance spike.
@@ -128,6 +135,8 @@ def run():
                 time.sleep(config.POLL_SECONDS)
                 continue
             balance = acc.balance
+
+            _apply_trailing_stops(initial_sl_by_ticket)
 
             balance_history.append((now, balance))
             prune_before = now - timedelta(days=config.SIZING_BALANCE_LOOKBACK_DAYS + 1)
@@ -216,6 +225,43 @@ def run():
         log.info("Stopped by user (Ctrl+C).")
     finally:
         connector.disconnect()
+
+
+def _apply_trailing_stops(initial_sl_by_ticket: dict) -> None:
+    """Mechanical, LLM-independent profit lock: every poll tick (not just on a
+    new candle, and independent of whatever the LLM decides that cycle),
+    ratchets each open position's stop-loss toward the current price once
+    it's shown a real gain, per risk.trailing_sl_update. This is what stops a
+    winner that reverses WITHOUT ever touching its original SL/TP from
+    round-tripping all the way back to breakeven or worse -- the exact
+    XAGUSD scenario (+$15k unrealized down to +$2k) that motivated adding it.
+    """
+    positions = trader.open_positions_all()
+    seen_tickets = set()
+    for pos in positions:
+        seen_tickets.add(pos.ticket)
+        if pos.ticket not in initial_sl_by_ticket:
+            # First time this ticket's been seen this run -- nothing has
+            # trailed it yet, so its current SL is still the original one.
+            initial_sl_by_ticket[pos.ticket] = pos.sl
+        if not pos.sl:
+            continue  # no SL to trail off of -- shouldn't happen for bot-opened positions
+        direction = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+        new_sl = risk.trailing_sl_update(
+            direction, pos.price_open, initial_sl_by_ticket[pos.ticket], pos.sl, pos.price_current
+        )
+        if new_sl is None:
+            continue
+        result = trader.modify_sl(pos, new_sl)
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            log.info("%s: trailing stop locking profit, SL %.5f -> %.5f", pos.symbol, pos.sl, new_sl)
+        else:
+            log.warning("%s: trailing stop modify failed retcode=%s",
+                         pos.symbol, getattr(result, "retcode", None))
+
+    for ticket in list(initial_sl_by_ticket):
+        if ticket not in seen_tickets:
+            del initial_sl_by_ticket[ticket]
 
 
 def _fallback_exit_management(closed_by_symbol):
